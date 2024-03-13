@@ -1,0 +1,407 @@
+---
+title: 'HEAP Demonstrator: QC and smoking index calculation'
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: console
+---
+
+# Set up options and libraries
+
+First, we need to set up our options and libraries.
+
+```{r setup, include = F}
+knitr::opts_chunk$set(message = F, warning = F, echo = F)
+
+library(here)
+
+library(GEOquery)
+library(eutopsQC)
+library(R.utils)
+library(Biobase)
+
+library(dplyr)
+library(ggplot2)
+
+here::i_am("script.rmd")
+```
+
+# Load data
+
+Here we analyse data from smokers, non-smokers, or moist tobacco users. Data are obtained from GEO under accession code [GSE94876](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE94876). The GEOquery package can hande downloads but is sometimes a bit fickle, so we use wget.
+
+```{r download.dat, eval=F}
+# dir.create(here("data"))
+out.path <- here("data")
+
+series.url <- 'https://ftp.ncbi.nlm.nih.gov/geo/series/GSE94nnn/GSE94876/matrix/GSE94876_series_matrix.txt.gz'
+download.file(series.url,
+              destfile = file.path(out.path, "series.matrix.txt.gz"))
+
+
+signal.url <- 'https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE94876&format=file&file=GSE94876%5Fmatrix%2Dsignal%2Dintensities%2Etxt%2Egz'
+download.file(signal.url, destfile = file.path(out.path, "signal.matrix.txt.gz"))
+```
+
+## Tidy phenotypic data
+
+Now that we have downloaded the data, let's prepare the phenotypic (series matrix) a bit for preprocessing:
+
+* Unzip data using R.utils
+* Parse file useing GEOquery's parseGEO
+* Extract phenotypic data using Biobase pData
+* Check signal matrix names
+* Tidy data using dplyr
+* View head using knitr
+
+```{r, eval = F}
+R.utils::gunzip(here("data", "series.matrix.txt.gz"))
+gse <- GEOquery::parseGEO(here("data", "series.matrix.txt"))
+
+pheno <- Biobase::pData(gse) |> 
+  dplyr::mutate(age = as.numeric(`age:ch1`),
+                type = ifelse(as.character(`class:ch1`) == "Non-Tobacco User", "Control", as.character(`class:ch1`)),
+                type = factor(type, levels = c("Control", "Moist Snuff User", "Cigarette Smoker")),
+                ethnicity = `race:ch1`,
+                sentrix_position = `sample_section:ch1`,
+                sentrix_id = `sentrix_barcode:ch1`,
+                
+                # note: typically basename would be sentrix ID/position of idats but here we use the name that is present in the signal matrix
+                basename = title) |> 
+  dplyr::select(basename, age, type, ethnicity, sentrix_id, sentrix_position)
+
+R.utils::gunzip(here("data", "signal.matrix.txt.gz"))
+l <- stringr::str_split(readLines(here("data", "signal.matrix.txt"), n = 1), "\t", simplify = T)
+l <- substr(l, 2, 9)
+
+if (!all(pheno$basename %in% l)){
+  stop("Warning: not all pheno samples in the signal matrix")
+}
+
+rm(gse, l);gc()
+
+head(pheno) |> knitr::kable()
+save(pheno, file = here("data", "pheno.Rdata"))
+```
+
+## QC
+
+```{r, eval=F}
+load(here("data", "pheno.Rdata"))
+library(eutopsQC)
+preprocessDataSigMatrix(input = here('data/GSE94876_matrix-signal-intensities.txt.gz'),
+                        output = here('data/'),
+                        report = here('qc/'),
+                        pheno = pheno,
+                        array = '450k',
+                        cores = 4,
+                        filter.loci = F,
+                        run.name = 'GEO_smk_saliva')
+```
+
+The QC results (html files) are presented in a separate website under `qc/`, but let's look at a few outputs here:
+
+* beta distributions
+
+```{r}
+load(here("qc", "Log", "GEO_smk_saliva_beta_density_plot.Rdata"))
+
+p
+```
+
+* pca: ic
+
+```{r}
+load(here("qc", "Log", "pheno_qc.Rdata"))
+
+pheno |> 
+  ggplot(aes(x = pc1,
+             y = pc2,
+             colour = ic)) +
+  geom_point()
+```
+
+* distribution of immune cell proportion and age estimates
+
+```{r fig.width=10, fig.height = 4}
+load(here("qc", "Log", "pheno_qc.Rdata"))
+
+a <- pheno |> 
+  ggplot(aes(x = type,
+             y = ic)) +
+  geom_boxplot() +
+  labs(x = '', y = 'immune cell proportion')
+
+b <- pheno |> 
+  ggplot(aes(x = age,
+             y = widage,
+             colour = type)) +
+  geom_point() +
+  geom_smooth(method = 'lm') +
+  labs(x = 'Chronological age',
+       y = 'WID-general-clock') +
+  geom_abline(slope = 1, intercept = 0) +
+  coord_cartesian(ylim = c(30, 70),
+                  xlim = c(30, 70))
+
+library(patchwork)
+a|b
+```
+
+# Compute smoking indices
+
+```{r}
+load(here("data", "beta.Rdata"))
+load(here("qc", "Log", "pheno_qc.Rdata"))
+
+if(!identical(pheno$basename, colnames(beta))){
+
+    if(all(grep(paste0(pheno$basename, collapse = "|"), colnames(beta)))){
+    ind <- grep(paste0(pheno$basename, collapse = "|"), colnames(beta))
+    beta <- as.matrix(beta[,ind])
+    colnames(beta) <- pheno$basename
+    beta <- as.matrix(beta)
+    }
+  }
+identical(colnames(beta), pheno$basename)
+
+library(WID.smk)
+
+res <- WID.smk::WID_SMK(beta)
+pheno <- cbind(pheno, res)
+```
+
+We use the 450K index versions because the data are based on the 450K array. The raw values show the expected dependence on ic - for instance, the immune hypomethylation index shows bigger hypomethylation in samples with higher immune cell proportion whereas epithelial hypomethylation index shows bigger loss of methylation with smokign in samples with lower immune cell proportion:
+
+```{r icdependence, fig.width=12, fig.height=4}
+pheno |> 
+  tidyr::pivot_longer(contains("WID_SMK450"),
+                      names_to = 'index',
+                      values_to = 'value') |> 
+  dplyr::mutate(index = stringr::str_wrap(gsub("_", " ", index), width = 20)) |> 
+  ggplot(aes(x = ic,
+             y = value,
+             colour = type)) +
+  geom_point() +
+  geom_smooth(method = 'lm') +
+  facet_wrap(~index,
+             nrow = 1) +
+  theme(legend.position = 'top')
+```
+
+We can correct the scores for ic content. Note, to do so we must have a column named `smoking_history` in our dataframe.
+
+We add this and use internal correction, meaning the data within the dataframe will be used to calculate the slopes (best for unknown slopes, such as for moist tobacco users or e-cigarette users)
+
+```{r}
+pheno <- pheno |> 
+  dplyr::mutate(smoking_history = case_when(type == 'Control' ~ "Non-smoker",
+                                            type == 'Moist Snuff User' ~ "Moist tobacco user",
+                                            type == 'Cigarette Smoker' ~ "Cigarette smoker")) |> 
+  WID.smk::correct_ic(correction = 'internal') |> 
+  dplyr::mutate(smoking_history = factor(smoking_history, levels = c("Non-smoker",
+                                                                     "Moist tobacco user",
+                                                                     "Cigarette smoker")))
+```
+
+Let's look at the scores now:
+
+```{r icdependence.corr, fig.width=12, fig.height=4}
+pheno |> 
+  tidyr::pivot_longer(contains("WID_SMK450") & ends_with("_corr"),
+                      names_to = 'index',
+                      values_to = 'value') |> 
+  dplyr::mutate(index = stringr::str_wrap(gsub("_", " ", index), width = 20)) |>
+  dplyr::mutate(smoking_history = factor(smoking_history, levels = c("Non-smoker",
+                                                                     "Moist tobacco user",
+                                                                     "Cigarette smoker"))) |> 
+  ggplot(aes(x = ic,
+             y = value,
+             colour = smoking_history)) +
+  geom_point() +
+  geom_smooth(method = 'lm') +
+  facet_wrap(~index,
+             nrow = 1) +
+  theme(legend.position = 'top')
+```
+
+What about boxplots?
+
+```{r boxplots.corr, fig.width = 12, fig.height = 4}
+pheno |> 
+  tidyr::pivot_longer(contains("WID_SMK450") & ends_with("_corr"),
+                      names_to = 'index',
+                      values_to = 'value') |> 
+  dplyr::mutate(index = stringr::str_wrap(gsub("_", " ", index), width = 20)) |>
+  dplyr::mutate(smoking_history = factor(smoking_history, levels = c("Non-smoker",
+                                                                     "Moist tobacco user",
+                                                                     "Cigarette smoker"))) |> 
+  ggplot(aes(x = smoking_history,
+             y = value,
+             fill = smoking_history)) +
+  geom_boxplot() +
+  facet_wrap(~index,
+             nrow = 1) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = 'top') +
+  labs(x = '',
+       y = 'mean beta (corrected)') +
+  ggpubr::stat_compare_means(comparisons = list(c("Non-smoker", "Cigarette smoker"),
+                                                c("Non-smoker", "Moist tobacco user"),
+                                                c("Moist tobacco user", "Cigarette smoker")),
+                             label = "p.format", size = 2.9,
+                             hide.ns = T,
+                             color = "grey40")
+```
+
+## Generate AUC plots
+
+```{r aucplots, fig.width = 16, fig.height = 4}
+library(pROC)
+
+plot_twotype_roc <- function(type, index, title = NULL,
+                             cols = c("gray20", "gray40"),
+                             style = "default",
+                             textcol = "white",
+                             direction = "<",
+                             size = 5){
+  
+  require(pROC)
+  
+  types <- as.character(levels(type))
+  types <- types[types != "Control"]
+  
+  rocs <- vector(mode = "list", length = length(types))
+  names(rocs) <- types
+  ci <- vector(mode = "list", length = length(types))
+  anno <- vector(mode = "list", length = length(types))
+  
+  for (t in types){
+    i <- which(types == t)
+    
+    tmptype <- droplevels(type[type %in% c("Control", t)])
+    tmpindex <- index[type %in% c("Control", t)]
+    rocs[[i]] <- roc(tmptype, tmpindex, direction = direction)
+    ci[[i]] <- ci.auc(rocs[[i]], conf.level = 0.95)
+    
+    anno[[i]] <- paste('AUC (', t, ') = ', round(rocs[[i]]$auc[[1]], 2),'\n(95% CI: ', round(ci[[i]][1], 2),'-',round(ci[[i]][3],2),')',sep='')
+    
+    
+    if(style == "lancet"){
+      anno[[i]] <- gsub("[.]", "·", anno[[i]])
+    }
+    
+  }
+  
+  for (i in 1:length(types)){
+    tmp <- data.frame(sensitivities = rocs[[i]]$sensitivities,
+                      specificities = rocs[[i]]$specificities,
+                      type = rep(types[i], length(rocs[[i]]$sensitivities)),
+                      anno = rep(anno[[i]], length(rocs[[i]]$specificities)))
+    
+    if (i == 1){
+      rocdf <- tmp
+    } else {
+      rocdf <- rbind(rocdf, tmp)
+    }
+  }
+  
+  anno.y <- vector("numeric", length = 4)
+  anno.y <- case_when(length(types) == 1 ~ c(0.2, 0, 0, 0),
+                      length(types) == 2 ~ c(0.35, 0.2, 0, 0),
+                     length(types) == 3 ~ c(0.35, 0.25, 0.15, 0),
+                     length(types) == 4 ~ c(0.45, 0.35, 0.25, 0.15))
+  anno.y <- anno.y[1:length(types)]
+  cols <- cols[1:length(types)]
+  
+  p <- rocdf |> 
+    mutate(type = factor(type, levels = types)) |> 
+    ggplot(aes(x = 1-specificities,
+               y = sensitivities,
+               colour = type)) +
+    geom_abline(slope = 1, intercept = 0, size = 0.5, colour = "gray40") +
+    geom_path() +
+    xlab("1 - Specificity") +
+    ylab("Sensitivity") +
+    annotate("label", 
+             x = 0.70,
+             y = anno.y,
+             label = anno,
+             fill = cols,
+             colour = textcol,
+             size = size) +
+    theme_minimal() +
+    theme(legend.position = "none") +
+    scale_colour_manual(values = cols)
+  
+  
+  return(p)
+}
+
+# Relevel factors
+
+pheno <- pheno |> 
+  dplyr::mutate(type = factor(type, levels = c("Control", "Moist Snuff User", "Cigarette Smoker")))
+
+a <- plot_twotype_roc(pheno$type, 
+                 pheno$WID_SMK450_epithelial_hypoM_corr,
+                 direction = 'auto',
+                 title = 'epithelial hypoM')
+
+b <- plot_twotype_roc(pheno$type, 
+                 pheno$WID_SMK450_immune_hypoM_corr,direction = "auto",
+                 title = 'immune hypoM')
+
+c <- plot_twotype_roc(pheno$type, 
+                 pheno$WID_SMK450_distal_epithelial_hyperM_corr,
+                 title = 'distal epithelial hyperM')
+
+d <- plot_twotype_roc(pheno$type, 
+                 pheno$WID_SMK450_proximal_epithelial_hyperM_corr,
+                 title = 'proximal epithelial hyperM')
+
+a|b|c|d
+```
+
+## Extras
+
+Indices can be scaled so their direction is more interpretable:
+
+```{r scaled.boxplots, fig.width = 12, fig.height = 4}
+pheno <- pheno |> 
+  WID.smk::scale()
+
+pheno |> 
+  tidyr::pivot_longer(contains("WID_SMK450") & ends_with("_corr_z"),
+                      names_to = 'index',
+                      values_to = 'value') |> 
+  dplyr::mutate(index = stringr::str_wrap(gsub("_", " ", index), width = 20)) |>
+  dplyr::mutate(smoking_history = factor(smoking_history, levels = c("Non-smoker",
+                                                                     "Moist tobacco user",
+                                                                     "Cigarette smoker"))) |> 
+  ggplot(aes(x = smoking_history,
+             y = value,
+             fill = smoking_history)) +
+  geom_boxplot() +
+  facet_wrap(~index,
+             nrow = 1) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = 'top') +
+  labs(x = '',
+       y = 'mean beta (corrected and scaled)') +
+  ggpubr::stat_compare_means(comparisons = list(c("Non-smoker", "Cigarette smoker"),
+                                                c("Non-smoker", "Moist tobacco user"),
+                                                c("Moist tobacco user", "Cigarette smoker")),
+                             label = "p.format", size = 2.9,
+                             hide.ns = T,
+                             color = "grey40")
+```
+
+# Session info
+
+```{r, results = 'asis'}
+sessionInfo()
+```
