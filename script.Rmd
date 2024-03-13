@@ -17,6 +17,15 @@ knitr::opts_chunk$set(message = F, warning = F, echo = F)
 library(here)
 
 library(GEOquery)
+
+if(!require(eutopsQC)){
+  devtools::install_github("chiaraherzog/eutopsQC")
+}
+
+if(!require(WID.smk)){
+  devtools::install_github("chiaraherzog/WID.smk")
+}
+
 library(eutopsQC)
 library(R.utils)
 library(Biobase)
