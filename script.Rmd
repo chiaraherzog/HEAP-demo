@@ -39,6 +39,10 @@ here::set_here()
 
 dir.create(here("data"))
 out.path <- here("data")
+
+# timeout options for GEO
+options(timeout = max(600, getOption("timeout")))
+options(download.file.method.GEOquery = "wget")
 ```
 
 # Load data
