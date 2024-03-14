@@ -33,7 +33,9 @@ library(Biobase)
 library(dplyr)
 library(ggplot2)
 
-here::i_am("script.rmd")
+# here::set_here()
+# 
+# here::i_am("script.rmd")
 ```
 
 # Load data
