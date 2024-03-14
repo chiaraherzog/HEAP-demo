@@ -11,7 +11,7 @@ editor_options:
 
 First, we need to set up our options and libraries.
 
-```{r setup, include = F}
+```{r setup.script, include = F}
 knitr::opts_chunk$set(message = F, warning = F, echo = F)
 
 library(here)
@@ -33,23 +33,25 @@ library(Biobase)
 library(dplyr)
 library(ggplot2)
 
-# here::set_here()
+here::set_here()
 # 
 # here::i_am("script.rmd")
+
+dir.create(here("data"))
+out.path <- here("data")
 ```
 
 # Load data
 
 Here we analyse data from smokers, non-smokers, or moist tobacco users. Data are obtained from GEO under accession code [GSE94876](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE94876). The GEOquery package can hande downloads but is sometimes a bit fickle, so we use wget.
 
-```{r download.dat}
-# dir.create(here("data"))
-out.path <- here("data")
+Because there can still be issues with accessing GEO ftp data, we provide the files alongside the script.
 
+```{r download.dat, eval = T}
 series.url <- 'https://ftp.ncbi.nlm.nih.gov/geo/series/GSE94nnn/GSE94876/matrix/GSE94876_series_matrix.txt.gz'
 download.file(series.url,
               destfile = file.path(out.path, "series.matrix.txt.gz"))
-
+R.utils::gunzip(here("data", "series.matrix.txt.gz"))
 
 signal.url <- 'https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE94876&format=file&file=GSE94876%5Fmatrix%2Dsignal%2Dintensities%2Etxt%2Egz'
 download.file(signal.url, destfile = file.path(out.path, "GSE94876_matrix-signal-intensities.txt.gz"))
@@ -66,8 +68,7 @@ Now that we have downloaded the data, let's prepare the phenotypic (series matri
 * Tidy data using dplyr
 * View head using knitr
 
-```{r}
-R.utils::gunzip(here("data", "series.matrix.txt.gz"))
+```{r read.geo.dat}
 gse <- GEOquery::parseGEO(here("data", "series.matrix.txt"))
 
 pheno <- Biobase::pData(gse) |> 
@@ -90,8 +91,7 @@ save(pheno, file = here("data", "pheno.Rdata"))
 
 ## QC
 
-```{r, eval=F}
-load(here("data", "pheno.Rdata"))
+```{r qc}
 library(eutopsQC)
 preprocessDataSigMatrix(input = here('data/GSE94876_matrix-signal-intensities.txt.gz'),
                         output = here('data/'),
@@ -107,7 +107,7 @@ The QC results (html files) are presented in a separate website under `qc/`, but
 
 * beta distributions
 
-```{r}
+```{r load.beta.distrib}
 load(here("qc", "Log", "GEO_smk_saliva_beta_density_plot.Rdata"))
 
 p
@@ -115,7 +115,7 @@ p
 
 * pca: ic
 
-```{r}
+```{r plot.ic}
 load(here("qc", "Log", "pheno_qc.Rdata"))
 
 pheno |> 
@@ -127,7 +127,7 @@ pheno |>
 
 * distribution of immune cell proportion and age estimates
 
-```{r fig.width=10, fig.height = 4}
+```{r plot.ic.age, fig.width=10, fig.height = 4}
 load(here("qc", "Log", "pheno_qc.Rdata"))
 
 a <- pheno |> 
@@ -154,7 +154,7 @@ a|b
 
 # Compute smoking indices
 
-```{r}
+```{r compute.smoking.indices}
 load(here("data", "beta.Rdata"))
 load(here("qc", "Log", "pheno_qc.Rdata"))
 
@@ -177,7 +177,7 @@ pheno <- cbind(pheno, res)
 
 We use the 450K index versions because the data are based on the 450K array. The raw values show the expected dependence on ic - for instance, the immune hypomethylation index shows bigger hypomethylation in samples with higher immune cell proportion whereas epithelial hypomethylation index shows bigger loss of methylation with smokign in samples with lower immune cell proportion:
 
-```{r icdependence, fig.width=12, fig.height=4}
+```{r icdependence.smk, fig.width=12, fig.height=4}
 pheno |> 
   tidyr::pivot_longer(contains("WID_SMK450"),
                       names_to = 'index',
@@ -197,7 +197,7 @@ We can correct the scores for ic content. Note, to do so we must have a column n
 
 We add this and use internal correction, meaning the data within the dataframe will be used to calculate the slopes (best for unknown slopes, such as for moist tobacco users or e-cigarette users)
 
-```{r}
+```{r rename.smk.history}
 pheno <- pheno |> 
   dplyr::mutate(smoking_history = case_when(type == 'Control' ~ "Non-smoker",
                                             type == 'Moist Snuff User' ~ "Moist tobacco user",
@@ -405,6 +405,6 @@ pheno |>
 
 # Session info
 
-```{r, results = 'asis'}
+```{r sessioninfo, results = 'asis'}
 sessionInfo()
 ```
